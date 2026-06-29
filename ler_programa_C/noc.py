@@ -66,8 +66,8 @@ class SoCPuro(SoCCore):
 
         # Instancia o Cérebro, a Memória e a Comunicação!
         SoCCore.__init__(self, platform, clk_freq=sys_clk_freq,
-                         cpu_type="vexriscv",         # O Processador RISC-V 32 bits
-                         #cpu_variant="minimal", # Deixa o processador mais básico e menor
+                         cpu_type="ibex",         # O Processador RISC-V 32 bits
+                         cpu_variant="standard", # Deixa o processador mais básico e menor
                          ident="Teste",    # O nome que aparece no boot
                          uart_name="sim",             # Conecta a UART no simulador
                          integrated_rom_size=0x8000,  # 32KB de ROM (Guarda a BIOS)
