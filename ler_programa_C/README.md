@@ -14,7 +14,7 @@ Este projeto consiste na implementação e simulação de um **System-on-Chip (S
 
 ## 💻 Como Executar o Projeto
 
-### 1. Gerar o Hardware (SoC com Ibex)
+### 1. Gerar o Hardware (SoC com Ibex) no terminal 1
 
 ```bash
 python3 noc.py
@@ -26,7 +26,7 @@ python3 noc.py
 make
 ```
 
-### 3. Carregar o Binário e Executar
+### 3. Carregar o Binário e Executar no terminal 2
 
 ```bash
 litex_term socket://127.0.0.1:5000 --kernel app.bin
