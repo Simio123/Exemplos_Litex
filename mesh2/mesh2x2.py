@@ -57,6 +57,8 @@ from litex.soc.interconnect import stream
 from litex.soc.cores.uart import UART
 from litex.soc.interconnect.csr import CSRStatus
 from router import Router, NoCInterface
+from litex.soc.integration.common import get_mem_data
+#from litex.soc.cores.clock import CRG
 
 # ---------------------------------------------------------------------
 # PHY Falso para enganar a BIOS sem quebrar o simulador
@@ -124,23 +126,34 @@ class MeshNode(SoCCore):
     def __init__(self, platform, node, sys_clk_freq, rom_init=None):
         x, y = node["x"], node["y"]
 
-        # 1. Inicializa o SoC com a UART DESLIGADA
+        # 1. Inicializa o SoC.
+        # IMPORTANTE: para o nó com UART real (id 0), passamos
+        # uart_name="sim" DIRETO aqui, exatamente como o noc.py que já
+        # funciona faz. Chamar with_uart=False e só depois self.add_uart()
+        # manualmente (como era antes) pula alguma etapa interna do
+        # SoCCore e deixa a UART muda, mesmo com a CSR/hierarquia
+        # aparentando estar tudo certo.
+        uart_kwargs = dict(uart_name="sim") if node["id"] == 0 else dict(with_uart=False)
+
         SoCCore.__init__(self, platform, clk_freq=sys_clk_freq,
             cpu_type               = "vexriscv",
-            cpu_variant            = "standard",
+            # "standard" trava a CPU sem produzir nenhuma saída de UART
+            # nesse ambiente (provavelmente a lógica de debug/JTAG do
+            # VexRiscv fica presa sem uma ponte de debug conectada em
+            # simulação pura). "minimal" não tem essa lógica e funciona.
+            cpu_variant            = "minimal",
             ident                  = f"NoC Node x{x} y{y}",
-            with_uart              = False,  # Impede o LiteX de gerar pinos bugados
             integrated_rom_size    = 0x10000, # AUMENTADO PARA 64KB PARA CABER O APP
             integrated_main_ram_size = 0x4000,
             integrated_rom_init    = rom_init or [],
+            **uart_kwargs,
         )
+        
+        print(self.mem_map)
 
-        # 2. Injetamos a UART manualmente!
-        if node["id"] == 0:
-            # O Nó 0 usa o terminal do simulador real
-            self.add_uart(uart_name="sim")
-        else:
-            # Os Nós 1, 2 e 3 recebem nossa UART falsa.
+        # 2. Nós 1, 2 e 3 recebem nossa UART falsa (o nó 0 já ganhou a
+        # UART real automaticamente acima, via uart_name="sim").
+        if node["id"] != 0:
             self.submodules.uart_phy = DummyUARTPHY()
             self.submodules.uart = UART(self.uart_phy)
             
@@ -176,9 +189,14 @@ class MeshNode(SoCCore):
 # ---------------------------------------------------------------------
 class MeshTop(Module):
     def __init__(self, platform, sys_clk_freq, rom_inits=None):
+
         rom_inits = rom_inits or {}
 
-        self.submodules.crg = CRG(platform.request("sys_clk"))
+        self.clock_domains.cd_sys = ClockDomain()
+
+        self.comb += self.cd_sys.clk.eq(
+            platform.request("sys_clk")
+        )
 
         self.nodes = {}
         for n in NODES:
@@ -236,9 +254,15 @@ def build_node_software(node, sys_clk_freq, output_dir):
     # --- NOVO: Adiciona o nosso aplicativo ao build do LiteX ---
     builder.add_software_package("noc_app", src_dir=os.path.abspath("noc_app"))
     builder.build(build=False, run=False)
+    #builder.build(build=True, run=True, trace=True, trace_fst=False)
     
-    # Retorna o nosso binário para ser injetado na ROM!
-    return os.path.join(builder.software_dir, "noc_app", "noc_app.bin")
+    # Retorna os dois binários: o nosso app e a BIOS padrão do LiteX
+    # (essa última já é compilada de qualquer forma pelo builder, em
+    # <output_dir>/software/bios/bios.bin — só não é usada como ROM a
+    # menos que a gente peça explicitamente).
+    noc_app_bin = os.path.join(builder.software_dir, "noc_app", "noc_app.bin")
+    bios_bin    = os.path.join(builder.software_dir, "bios", "bios.bin")
+    return noc_app_bin, bios_bin
 
 # ---------------------------------------------------------------------
 # 6. Fase 2 — build final: gateware combinado com as 4 CPUs + malha
@@ -246,12 +270,15 @@ def build_node_software(node, sys_clk_freq, output_dir):
 def main():
     sys_clk_freq = int(10e6)
 
-    # Fase 1: software de cada nó (gera noc_app.bin individualmente)
+    # Fase 1: software de cada nó (gera noc_app.bin e bios.bin de cada um)
     rom_inits = {}
     for n in NODES:
-        bios_bin = build_node_software(n, sys_clk_freq,
+        noc_app_bin, bios_bin = build_node_software(n, sys_clk_freq,
                                         output_dir=f"build/node{n['id']}_sw")
-        rom_inits[n["id"]] = get_mem_data(bios_bin, endianness="little")
+        # Todos os nós rodam o noc_app de verdade (modo debug encerrado —
+        # já validamos que a BIOS bootava certinho, o problema era o
+        # cpu_variant + a dependência do Makefile, ambos corrigidos).
+        rom_inits[n["id"]] = get_mem_data(noc_app_bin, endianness="little")
 
     # Fase 2: hardware combinado (as 4 CPUs + a malha, num único Verilator)
     platform = Platform()
@@ -264,7 +291,10 @@ def main():
             sim_config.add_module("serial2tcp", "serial",
                                    args={"port": n["uart_port"]})
 
-    platform.build(top, sim_config=sim_config, run=True)
+    print(f"\nSubindo a malha 2x2. Terminal do nó 0: telnet localhost {NODES[0]['uart_port']}\n")
+
+    platform.build(top, sim_config=sim_config, run=True, trace=True, trace_fst=False)
+    print("CPU reset:", hex(top.node0.cpu.reset_address))
     print("\nMalha 2x2 rodando! Terminal (nó 0, x=0 y=0):")
     print(f"  telnet localhost {NODES[0]['uart_port']}")
     print("\nOs nós 1-3 estão rodando (CPU+ROM+RAM+roteador) mas sem UART")
